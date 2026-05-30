@@ -49,9 +49,11 @@ export class Vendor {
 
   sell(player, itemId) {
     const item = ITEMS[itemId];
-    if (!item || !item.value) return { ok: false, reason: 'Cannot sell that.' };
+    if (!item) return { ok: false, reason: 'Cannot sell that.' };
+    const payout = item.sellValue ?? Math.floor((item.value ?? 0) * 0.4);
+    if (payout <= 0) return { ok: false, reason: 'Cannot sell that.' };
     if (!player.inventory.remove(itemId)) return { ok: false, reason: 'Not in inventory.' };
-    player.gold += Math.floor(item.value * 0.5);
-    return { ok: true };
+    player.gold += payout;
+    return { ok: true, payout };
   }
 }
