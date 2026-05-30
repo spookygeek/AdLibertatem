@@ -15,10 +15,18 @@ export class Player {
     this.xp = 0;
     this.xpNext = XP_PER_LEVEL(1);
     this.gold = 0;
+    this.honor = 0;
+    this.honorMax = 50;
 
-    // Deep-copy base stats from class definition
+    // Stats deep-copied from class definition (uses str/def/spd naming)
     this.stats = { ...classDef.stats };
-    this.baseStats = { ...classDef.stats };
+
+    // Equipment slots — all empty at start
+    this.equipment = {
+      head: null, body: null, boots: null,
+      mainhand: null, offhand: null,
+      ring: null, necklace: null,
+    };
 
     this.inventory = new Inventory();
   }
@@ -26,7 +34,7 @@ export class Player {
   gainXp(amount) {
     this.xp += amount;
     const leveled = [];
-    while (this.xp >= this.xpNext) {
+    while (this.xp >= this.xpNext && this.level < 20) {
       this.xp -= this.xpNext;
       this._levelUp();
       leveled.push(this.level);
@@ -36,11 +44,15 @@ export class Player {
   }
 
   _levelUp() {
+    if (this.level >= 20) return;
     this.level += 1;
-    this.stats.maxHp += 3;
-    this.stats.hp = Math.min(this.stats.hp + 3, this.stats.maxHp);
-    this.stats.atk += 1;
-    this.stats.def += 1;
+    const g = this.classDef.growth;
+    this.stats.maxHp += g.hp;
+    this.stats.hp     = Math.min(this.stats.hp + g.hp, this.stats.maxHp);
+    this.stats.str   += g.str;
+    this.stats.def   += g.def;
+    this.stats.spd   += g.spd;
+    this.stats.maxMp += g.mp;
   }
 
   heal(amount) {

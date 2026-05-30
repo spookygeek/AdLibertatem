@@ -1,5 +1,3 @@
-/* global ROT */
-
 export class Dungeon {
   constructor(cols, rows) {
     this.cols = cols;

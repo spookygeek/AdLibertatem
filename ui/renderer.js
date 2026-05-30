@@ -10,42 +10,82 @@ const GLYPH = {
 
 export class Renderer {
   constructor(canvas, cols, rows, hudRows) {
-    this.canvas = canvas;
-    this.cols = cols;
-    this.rows = rows;
+    this.canvas  = canvas;
+    this.cols    = cols;
+    this.rows    = rows;
     this.hudRows = hudRows;
-    this.cellW = CELL_W;
-    this.cellH = CELL_H;
+    this.cellW   = CELL_W;
+    this.cellH   = CELL_H;
 
-    canvas.width = cols * CELL_W;
+    canvas.width  = cols * CELL_W;
     canvas.height = (rows + hudRows) * CELL_H;
 
     this.ctx = canvas.getContext('2d');
-    this.ctx.font = `${FONT_SIZE}px "Courier New", monospace`;
-    this.ctx.textBaseline = 'top';
+    this.ctx.font          = `${FONT_SIZE}px "Courier New", monospace`;
+    this.ctx.textBaseline  = 'top';
   }
 
-  // Top-left pixel of a dungeon cell
+  // ── Coordinate helpers ────────────────────────────────────────────────────
+
   cellX(col) { return col * this.cellW; }
   cellY(row) { return row * this.cellH; }
+  hudY(row)  { return (this.rows + row) * this.cellH; }
 
-  // Top-left pixel of a HUD row (below dungeon area)
-  hudY(row) { return (this.rows + row) * this.cellH; }
+  // ── Drawing primitives ────────────────────────────────────────────────────
 
+  /** Fill the dungeon area only. */
   clear() {
     this.ctx.fillStyle = '#0a0a0a';
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
+
+  /** Fill the entire canvas — used by menu/title screens. */
+  clearFull(bgColor = '#0a0a0a') {
+    this.ctx.fillStyle = bgColor;
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+  }
+
+  /**
+   * Draw text at pixel coordinates (not grid cells).
+   * Temporarily changes font size, then restores default — never breaks dungeon rendering.
+   */
+  text(str, x, y, color, fontSize = FONT_SIZE) {
+    this.ctx.fillStyle = color;
+    this.ctx.font      = `${fontSize}px "Courier New", monospace`;
+    this.ctx.fillText(str, x, y);
+    this.ctx.font      = `${FONT_SIZE}px "Courier New", monospace`;
+  }
+
+  /** Full-width horizontal separator line, 1px tall. */
+  hline(y, color = '#333') {
+    this.ctx.fillStyle = color;
+    this.ctx.fillRect(0, y, this.canvas.width, 1);
+  }
+
+  /**
+   * Returns the x coordinate that horizontally centers str on the canvas.
+   * Temporarily sets the font for measurement, then restores default.
+   */
+  centerX(str, fontSize = FONT_SIZE) {
+    this.ctx.font   = `${fontSize}px "Courier New", monospace`;
+    const w         = this.ctx.measureText(str).width;
+    this.ctx.font   = `${FONT_SIZE}px "Courier New", monospace`;
+    return Math.floor((this.canvas.width - w) / 2);
+  }
+
+  // ── Grid-based helpers (used by HUD) ─────────────────────────────────────
 
   drawChar(char, col, row, color) {
     this.ctx.fillStyle = color;
     this.ctx.fillText(char, this.cellX(col), this.cellY(row));
   }
 
-  drawHudChar(char, col, row, color) {
+  drawHudChar(str, col, row, color) {
     this.ctx.fillStyle = color;
-    this.ctx.fillText(char, this.cellX(col), this.hudY(row));
+    this.ctx.fillText(str, this.cellX(col), this.hudY(row));
   }
+
+  // ── Dungeon rendering ─────────────────────────────────────────────────────
 
   drawDungeon(dungeon, player) {
     this.clear();

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "lint": "eslint js/",
+    "lint": "eslint game.js engine/ ui/ data/",
     "serve": "npx serve . -l 8080"
   },
   "devDependencies": {
