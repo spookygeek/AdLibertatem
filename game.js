@@ -1,8 +1,11 @@
-import { Dungeon }  from './engine/dungeon.js';
-import { Player }   from './engine/player.js';
-import { Renderer } from './ui/renderer.js';
-import { Hud }      from './ui/hud.js';
-import { CLASSES }  from './data/classes.js';
+import { Dungeon }             from './engine/dungeon.js';
+import { Player }              from './engine/player.js';
+import { resolveMelee,
+         applyDamage }         from './engine/combat.js';
+import { Renderer }            from './ui/renderer.js';
+import { Hud }                 from './ui/hud.js';
+import { TextPanel }           from './ui/textpanel.js';
+import { CLASSES }             from './data/classes.js';
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 const COLS     = 72;
@@ -15,11 +18,15 @@ const CLASS_ORDER = ['secutor', 'retiarius', 'murmillo', 'dimachaerus'];
 // Maximums for scaling stat bars on the class-select screen
 const STAT_MAX = { hp: 120, str: 18, def: 12, spd: 12, mp: 60 };
 
+// How far away an enemy must be before it notices the player
+const DETECT_RANGE = 8;
+
 // ── Core modules ──────────────────────────────────────────────────────────────
-const canvas   = document.getElementById('game-canvas');
-const renderer = new Renderer(canvas, COLS, ROWS, HUD_ROWS);
-const hud      = new Hud(renderer);
-const ctx      = renderer.ctx;
+const canvas    = document.getElementById('game-canvas');
+const renderer  = new Renderer(canvas, COLS, ROWS, HUD_ROWS);
+const hud       = new Hud(renderer);
+const textPanel = new TextPanel(renderer);
+const ctx       = renderer.ctx;
 
 // ── Intro narrative pages ─────────────────────────────────────────────────────
 const INTRO_PAGES = [
@@ -50,30 +57,144 @@ const INTRO_PAGES = [
   ],
 ];
 
-// ── Shared game state (single object passed to all state handlers) ────────────
+// ── Shared game state ─────────────────────────────────────────────────────────
 const gs = {
-  player:       null,    // set in CHARACTER_NAME on confirm
-  dungeon:      null,    // set when entering EXPLORATION via Ludus
+  player:       null,
+  dungeon:      null,
   messages:     [],
-  state:        null,    // current state name string
+  state:        null,
 
-  classIndex:   0,       // 0–3: highlighted class on selection screen
-  pendingClass: null,    // classDef being previewed
-
-  pendingName:  '',      // name string typed by user
+  classIndex:   0,
+  pendingClass: null,
+  pendingName:  '',
   introPage:    0,
+  ludusRested:  false,
 
-  ludusRested:  false,   // true once barracks rest used this mission cycle
+  // Active combat data; populated when entering COMBAT state
+  combat: {
+    enemy: null,
+    log:   [],
+    turn:  'player',  // 'player' | 'victory' | 'dead'
+  },
 };
 
-// ── Stat bar helper (used on class-select screen) ─────────────────────────────
+// ── Stat bar helper (class-select screen) ─────────────────────────────────────
 function drawStatBar(label, value, max, x, y, color) {
   const BARS   = 18;
   const filled = Math.round((value / max) * BARS);
   const barStr = '█'.repeat(filled) + '░'.repeat(BARS - filled);
-  renderer.text(label.padEnd(4), x,          y, '#777', 14);
-  renderer.text(barStr,          x + 48,     y, color,  14);
+  renderer.text(label.padEnd(4), x,         y, '#777', 14);
+  renderer.text(barStr,          x + 48,    y, color,  14);
   renderer.text(String(value),   x + 48 + BARS * 9, y, '#ccc', 14);
+}
+
+// ── Enemy AI helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Returns the next [x, y] that moves entity one step toward target.
+ * Tries diagonal first, then cardinal directions.
+ * Returns entity's current position if completely blocked.
+ */
+function stepToward(entity, target, dungeon) {
+  const dx = Math.sign(target.x - entity.x);
+  const dy = Math.sign(target.y - entity.y);
+
+  const candidates = [];
+  if (dx !== 0 && dy !== 0) candidates.push([entity.x + dx, entity.y + dy]);
+  if (dx !== 0)              candidates.push([entity.x + dx, entity.y]);
+  if (dy !== 0)              candidates.push([entity.x,      entity.y + dy]);
+
+  for (const [nx, ny] of candidates) {
+    // Allow stepping onto the target tile (player tile) even if not "passable"
+    if (nx === target.x && ny === target.y) return [nx, ny];
+    if (dungeon.isPassable(nx, ny)) return [nx, ny];
+  }
+  return [entity.x, entity.y];
+}
+
+/**
+ * Advance every living enemy one step toward the player.
+ * If any enemy reaches the player tile, enters COMBAT state and returns early.
+ */
+function processEnemyTurns(gs) {
+  for (const enemy of gs.dungeon.enemies) {
+    if (!enemy.alive) continue;
+
+    const dist = Math.abs(enemy.x - gs.player.x) + Math.abs(enemy.y - gs.player.y);
+    if (dist > DETECT_RANGE) continue;
+
+    const [nx, ny] = stepToward(enemy, gs.player, gs.dungeon);
+
+    // Enemy reaches player tile → enter combat
+    if (nx === gs.player.x && ny === gs.player.y) {
+      gs.combat = {
+        enemy,
+        log:  [`The ${enemy.name} closes in on you!`],
+        turn: 'player',
+      };
+      transition('COMBAT');
+      return; // stop — one combat at a time
+    }
+
+    // Don't stack onto another enemy
+    const blocked = gs.dungeon.enemies.some(
+      e => e.alive && e !== enemy && e.x === nx && e.y === ny,
+    );
+    if (!blocked) {
+      enemy.x = nx;
+      enemy.y = ny;
+    }
+  }
+}
+
+// ── Combat helpers ────────────────────────────────────────────────────────────
+
+function doEnemyAttack(gs) {
+  const { player, combat } = gs;
+  const result = resolveMelee(combat.enemy, player);
+  applyDamage(player, result.damage);
+  combat.log.push(result.log);
+
+  if (player.isDead()) {
+    combat.log.push('You have fallen...');
+    combat.turn = 'dead';
+  } else {
+    combat.turn = 'player';
+  }
+}
+
+function doPlayerAttack(gs) {
+  const { player, combat } = gs;
+  const result = resolveMelee(player, combat.enemy);
+  applyDamage(combat.enemy, result.damage);
+  combat.log.push(result.log);
+
+  if (combat.enemy.stats.hp <= 0) {
+    combat.enemy.alive = false;
+    const leveled = player.gainXp(combat.enemy.xp);
+    player.gold += combat.enemy.gold;
+    combat.log.push(
+      `${combat.enemy.name} defeated!  +${combat.enemy.xp} XP  +${combat.enemy.gold} gold`,
+    );
+    leveled.forEach(lv => combat.log.push(`★ LEVEL UP — you are now level ${lv}!`));
+    combat.turn = 'victory';
+  } else {
+    doEnemyAttack(gs);
+  }
+}
+
+function doPlayerFlee(gs) {
+  const { player, combat } = gs;
+  const speedAdv = player.stats.spd - combat.enemy.stats.spd;
+  const chance   = Math.max(0.20, Math.min(0.85, 0.40 + speedAdv * 0.05));
+
+  if (ROT.RNG.getUniform() < chance) {
+    gs.messages.push(`You fled from the ${combat.enemy.name}.`);
+    transition('EXPLORATION');   // transition draws for us
+  } else {
+    combat.log.push('You fail to escape!');
+    doEnemyAttack(gs);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -124,13 +245,12 @@ const CHARACTER_CLASS = {
     const W = canvas.width;
     const H = canvas.height;
 
-    // ── Header ────────────────────────────────────────────────────────────────
     renderer.text(
       'CHOOSE  YOUR  CLASS',
       renderer.centerX('CHOOSE  YOUR  CLASS', 22), 22, '#e8c97d', 22,
     );
 
-    // ── Class tabs ────────────────────────────────────────────────────────────
+    // Class tabs
     const tabW = Math.floor(W / 4);
     CLASS_ORDER.forEach((key, i) => {
       const cls      = CLASSES[key];
@@ -145,7 +265,6 @@ const CHARACTER_CLASS = {
         ctx.fillRect(tabX + 1, 60, tabW - 2, 36);
       }
 
-      // Measure at the correct font size to center the label within its tab
       ctx.font = `${fontSize}px "Courier New", monospace`;
       const lx = tabX + Math.floor((tabW - ctx.measureText(label).width) / 2);
       renderer.text(label, lx, 68, color, fontSize);
@@ -153,12 +272,11 @@ const CHARACTER_CLASS = {
 
     renderer.hline(100, '#2a2a2a');
 
-    // ── Left column: class details ────────────────────────────────────────────
+    // Left column: class details
     const cls  = gs.pendingClass;
     const LEFT = 30;
     renderer.text(cls.name.toUpperCase(), LEFT, 118, cls.color, 22);
 
-    // Word-wrap flavor text at ~40 chars
     const words = cls.flavor.split(' ');
     let   line  = '';
     let   ly    = 156;
@@ -179,7 +297,7 @@ const CHARACTER_CLASS = {
     renderer.text(`Armor:   ${cls.startArmor}`,  LEFT, ly,      '#ccc',    14); ly += 22;
     renderer.text(`Ability: ${cls.ability}`,     LEFT, ly,      '#ffca28', 14);
 
-    // ── Right column: stat bars ───────────────────────────────────────────────
+    // Right column: stat bars
     const RIGHT = Math.floor(W / 2) + 10;
     let   ry    = 118;
     renderer.text('STATISTICS', RIGHT, ry, '#555', 14); ry += 28;
@@ -229,7 +347,6 @@ const CHARACTER_NAME = {
       renderer.centerX('NAME  YOUR  GLADIATOR', 28), 180, '#e8c97d', 28,
     );
 
-    // Input box
     const boxW = 420;
     const boxX = Math.floor((W - boxW) / 2);
     const boxY = 256;
@@ -238,13 +355,8 @@ const CHARACTER_NAME = {
     ctx.strokeRect(boxX, boxY, boxW, 38);
     renderer.text(`${gs.pendingName}_`, boxX + 14, boxY + 9, '#fff', 20);
 
-    // Class reminder
     const reminder = `Class: ${cls.name}`;
-    renderer.text(
-      reminder,
-      renderer.centerX(reminder, 16),
-      330, cls.color, 16,
-    );
+    renderer.text(reminder, renderer.centerX(reminder, 16), 330, cls.color, 16);
 
     renderer.text(
       'Type a name (max 16 characters), then press Enter',
@@ -285,13 +397,13 @@ const INTRO = {
 
   draw(gs) {
     renderer.clearFull('#080808');
-    const lines  = INTRO_PAGES[gs.introPage];
-    let   lineY  = 160;
+    const lines = INTRO_PAGES[gs.introPage];
+    let   ly    = 160;
 
     for (const line of lines) {
-      if (line === '') { lineY += 14; continue; }
-      renderer.text(line, 80, lineY, '#ccc', 16);
-      lineY += 28;
+      if (line === '') { ly += 14; continue; }
+      renderer.text(line, 80, ly, '#ccc', 16);
+      ly += 28;
     }
 
     const isLast = gs.introPage === INTRO_PAGES.length - 1;
@@ -302,10 +414,7 @@ const INTRO = {
   handle(gs, e) {
     if (e.key === 'Enter') {
       gs.introPage += 1;
-      if (gs.introPage >= INTRO_PAGES.length) {
-        transition('LUDUS');
-        return false;
-      }
+      if (gs.introPage >= INTRO_PAGES.length) { transition('LUDUS'); return false; }
       return true;
     }
     return false;
@@ -322,20 +431,15 @@ const LUDUS = {
     renderer.clearFull('#0c0c0f');
     const H = canvas.height;
 
-    // ── Header ────────────────────────────────────────────────────────────────
     renderer.text('LUDUS  MAGNUS', renderer.centerX('LUDUS  MAGNUS', 28), 26, '#c0a060', 28);
     renderer.text('Capua, 73 BC',  renderer.centerX('Capua, 73 BC',  14), 66, '#555',    14);
     renderer.hline(90, '#2a2a2a');
 
-    // ── Player summary ────────────────────────────────────────────────────────
     if (gs.player) {
       const p = gs.player;
       const s = p.stats;
       renderer.text(p.name, 40, 108, p.color, 20);
-      renderer.text(
-        `${p.classDef.name}   Level ${p.level}   XP ${p.xp}/${p.xpNext}`,
-        40, 136, '#aaa', 14,
-      );
+      renderer.text(`${p.classDef.name}   Level ${p.level}   XP ${p.xp}/${p.xpNext}`, 40, 136, '#aaa', 14);
       renderer.text(
         `HP ${s.hp}/${s.maxHp}   MP ${s.mp}/${s.maxMp}   Gold ${p.gold}   Honor ${p.honor}/${p.honorMax}`,
         40, 158, '#aaa', 14,
@@ -345,24 +449,22 @@ const LUDUS = {
     renderer.hline(188, '#2a2a2a');
     renderer.text('WHAT  WILL  YOU  DO?', 40, 208, '#666', 14);
 
-    // ── Menu items ────────────────────────────────────────────────────────────
     const restedNote = gs.ludusRested ? '  (already rested)' : '';
-    const menuItems = [
-      { key: 'M', label: 'Mission Board', desc: 'Enter the arena',                  color: '#4caf50' },
+    const items = [
+      { key: 'M', label: 'Mission Board', desc: 'Enter the arena',                   color: '#4caf50' },
       { key: 'B', label: 'Barracks',      desc: `Rest and recover HP / MP${restedNote}`, color: '#42a5f5' },
-      { key: 'S', label: 'Stash',         desc: 'View your equipment',               color: '#ffb74d' },
-      { key: 'G', label: 'Gate to Town',  desc: 'Visit the market',                  color: '#ce93d8' },
+      { key: 'S', label: 'Stash',         desc: 'View your equipment',                color: '#ffb74d' },
+      { key: 'G', label: 'Gate to Town',  desc: 'Visit the market',                   color: '#ce93d8' },
     ];
-    menuItems.forEach((item, i) => {
+    items.forEach((item, i) => {
       const y = 248 + i * 46;
-      renderer.text('[',        40,  y, '#666',      16);
-      renderer.text(item.key,   52,  y, '#fff',      16);
-      renderer.text(']',        62,  y, '#666',      16);
-      renderer.text(item.label, 82,  y, item.color,  16);
+      renderer.text('[',        40,        y, '#666',     16);
+      renderer.text(item.key,   52,        y, '#fff',     16);
+      renderer.text(']',        62,        y, '#666',     16);
+      renderer.text(item.label, 82,        y, item.color, 16);
       renderer.text(`— ${item.desc}`, 82 + 168, y, '#555', 13);
     });
 
-    // ── Message log ───────────────────────────────────────────────────────────
     renderer.hline(H - 62, '#2a2a2a');
     gs.messages.slice(-2).forEach((msg, i) => {
       renderer.text(msg, 40, H - 50 + i * 20, '#777', 13);
@@ -371,7 +473,6 @@ const LUDUS = {
 
   handle(gs, e) {
     switch (e.key.toUpperCase()) {
-
       case 'M': {
         gs.dungeon = new Dungeon(COLS, ROWS);
         gs.dungeon.generate();
@@ -381,7 +482,6 @@ const LUDUS = {
         transition('EXPLORATION');
         return false;
       }
-
       case 'B': {
         if (!gs.ludusRested) {
           gs.player.stats.hp = gs.player.stats.maxHp;
@@ -393,11 +493,9 @@ const LUDUS = {
         }
         return true;
       }
-
       case 'S':
         gs.messages.push('[Stash] Coming in a future update.');
         return true;
-
       case 'G':
         gs.messages.push('[Town Gate] Coming in a future update.');
         return true;
@@ -418,9 +516,7 @@ const MOVE_KEYS = {
 
 const EXPLORATION = {
   enter(gs) {
-    // Reset barracks rest so the player can rest again next cycle
     gs.ludusRested = false;
-    // Reveal the tiles visible from the player's starting position
     gs.dungeon.computeFov(gs.player.x, gs.player.y);
   },
 
@@ -430,7 +526,7 @@ const EXPLORATION = {
   },
 
   handle(gs, e) {
-    // Debug shortcut: Escape returns to Ludus without penalty
+    // Debug escape: return to Ludus
     if (e.key === 'Escape') {
       gs.messages.push('You retreat from the arena.');
       transition('LUDUS');
@@ -443,7 +539,7 @@ const EXPLORATION = {
     const nx = gs.player.x + delta[0];
     const ny = gs.player.y + delta[1];
 
-    // Step on stairs → descend to next floor
+    // Stepping on stairs → descend
     if (gs.dungeon.isStairs(nx, ny)) {
       gs.dungeon.descend();
       gs.player.x = gs.dungeon.startX;
@@ -453,13 +549,124 @@ const EXPLORATION = {
       return true;
     }
 
-    if (gs.dungeon.isPassable(nx, ny)) {
-      gs.player.x = nx;
-      gs.player.y = ny;
-      gs.dungeon.computeFov(gs.player.x, gs.player.y);
-      return true;
+    if (!gs.dungeon.isPassable(nx, ny)) return false;
+
+    // Player bumps into an enemy → enter combat (player attacks first)
+    const target = gs.dungeon.enemies.find(e => e.alive && e.x === nx && e.y === ny);
+    if (target) {
+      gs.combat = {
+        enemy: target,
+        log:   [`You engage the ${target.name}!`],
+        turn:  'player',
+      };
+      transition('COMBAT');
+      return false;
     }
 
+    // Normal move
+    gs.player.x = nx;
+    gs.player.y = ny;
+    gs.dungeon.computeFov(gs.player.x, gs.player.y);
+
+    // Enemy turns — may transition to COMBAT if an enemy closes in
+    processEnemyTurns(gs);
+
+    // If processEnemyTurns called transition(), gs.state is no longer EXPLORATION.
+    // Returning false prevents a redundant EXPLORATION redraw over the COMBAT screen.
+    return gs.state === 'EXPLORATION';
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATE: COMBAT
+// ═══════════════════════════════════════════════════════════════════════════════
+const COMBAT = {
+  enter(gs) {
+    if (!gs.combat.log.length) {
+      gs.combat.log = [`You engage the ${gs.combat.enemy.name}!`];
+    }
+  },
+
+  draw(gs) {
+    // Dungeon is "frozen" during combat — draw it but don't update FOV
+    renderer.drawDungeon(gs.dungeon, gs.player);
+    textPanel.draw(gs.combat);
+  },
+
+  handle(gs, e) {
+    const { turn } = gs.combat;
+
+    // Victory or death: any key to advance
+    if (turn === 'victory' || turn === 'dead') {
+      if (e.key === 'Enter' || e.key === ' ') {
+        if (turn === 'dead') {
+          transition('GAME_OVER');
+        } else {
+          // Remove dead enemies and return to exploration
+          gs.dungeon.enemies = gs.dungeon.enemies.filter(en => en.alive);
+          transition('EXPLORATION');
+        }
+        return false;
+      }
+      return false;
+    }
+
+    if (turn !== 'player') return false;
+
+    const prevState = gs.state;
+
+    if (e.key.toLowerCase() === 'a') {
+      doPlayerAttack(gs);
+    } else if (e.key.toLowerCase() === 'f') {
+      doPlayerFlee(gs);    // may call transition('EXPLORATION') internally
+    } else if (e.key.toLowerCase() === 'i') {
+      gs.combat.log.push('[USE ITEM] No items available yet.');
+    } else {
+      return false;
+    }
+
+    // If a transition happened (e.g. flee succeeded), don't redraw COMBAT
+    return gs.state === prevState;
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATE: GAME_OVER
+// ═══════════════════════════════════════════════════════════════════════════════
+const GAME_OVER = {
+  enter() {},
+
+  draw(gs) {
+    renderer.clearFull('#060608');
+    renderer.text(
+      'YOU  HAVE  FALLEN',
+      renderer.centerX('YOU  HAVE  FALLEN', 34), 190, '#ef5350', 34,
+    );
+    if (gs.player) {
+      const summary = `${gs.player.name}  —  ${gs.player.classDef.name}  —  Level ${gs.player.level}`;
+      renderer.text(summary, renderer.centerX(summary, 18), 258, '#888', 18);
+    }
+    renderer.text(
+      '"The crowd is silent."',
+      renderer.centerX('"The crowd is silent."', 16), 340, '#555', 16,
+    );
+    renderer.hline(430, '#2a2a2a');
+    renderer.text(
+      'Press Enter to return to the title screen',
+      renderer.centerX('Press Enter to return to the title screen', 14), 462, '#777', 14,
+    );
+  },
+
+  handle(gs, e) {
+    if (e.key === 'Enter') {
+      // Reset for a fresh run
+      gs.player      = null;
+      gs.dungeon     = null;
+      gs.messages    = [];
+      gs.ludusRested = false;
+      transition('TITLE');
+      return false;
+    }
     return false;
   },
 };
@@ -467,14 +674,23 @@ const EXPLORATION = {
 // ═══════════════════════════════════════════════════════════════════════════════
 // State registry + machine
 // ═══════════════════════════════════════════════════════════════════════════════
-const STATES = { TITLE, CHARACTER_CLASS, CHARACTER_NAME, INTRO, LUDUS, EXPLORATION };
+const STATES = {
+  TITLE,
+  CHARACTER_CLASS,
+  CHARACTER_NAME,
+  INTRO,
+  LUDUS,
+  EXPLORATION,
+  COMBAT,
+  GAME_OVER,
+};
 
 /**
  * Switch to a new state: update gs.state, run enter(), then draw().
  *
- * IMPORTANT: any handle() that calls transition() must return false afterward.
- * transition() already draws the new state; returning true would trigger a
- * second draw of that new state from the keydown handler — a wasted paint.
+ * Any handle() that calls transition() must return false afterward —
+ * transition() already drew the new state, and returning true would cause a
+ * second redundant draw of the new state from the keydown handler.
  */
 function transition(newState) {
   gs.state = newState;
@@ -485,8 +701,6 @@ function transition(newState) {
 document.addEventListener('keydown', (e) => {
   const s = STATES[gs.state];
   if (!s) return;
-  // handle() returns true  → key was consumed, redraw current state
-  // handle() returns false → key ignored or transition() already drew
   const consumed = s.handle(gs, e);
   if (consumed) {
     e.preventDefault();

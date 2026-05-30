@@ -98,21 +98,29 @@ export class Renderer {
   drawDungeon(dungeon, player) {
     this.clear();
 
+    // Tiles — three visibility states
     for (const [key, tile] of Object.entries(dungeon.tiles)) {
       const [x, y] = key.split(',').map(Number);
 
       if (dungeon.visible.has(key)) {
-        // Currently in FOV — full brightness
         const g = GLYPH[tile] ?? GLYPH['#'];
         this.drawChar(g.char, x, y, g.color);
       } else if (dungeon.explored.has(key)) {
-        // Seen before but not currently visible — dim memory
         const g = GLYPH_DIM[tile] ?? GLYPH_DIM['#'];
         this.drawChar(g.char, x, y, g.color);
       }
-      // Hidden tiles: draw nothing — black background shows through
+      // Hidden: draw nothing, black background shows through
     }
 
+    // Enemies — only draw when in the player's current FOV
+    for (const enemy of dungeon.enemies) {
+      if (!enemy.alive) continue;
+      if (dungeon.visible.has(`${enemy.x},${enemy.y}`)) {
+        this.drawChar(enemy.char, enemy.x, enemy.y, enemy.color);
+      }
+    }
+
+    // Player is always visible
     this.drawChar(player.char, player.x, player.y, player.color);
   }
 }
