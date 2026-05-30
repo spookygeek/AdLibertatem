@@ -4,12 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Ad Libertatem</title>
-  <link rel="stylesheet" href="css/style.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0a0a; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+    #game-canvas { display: block; }
+  </style>
 </head>
 <body>
   <canvas id="game-canvas"></canvas>
-  <!-- rot.js UMD global — sets window.ROT -->
   <script src="https://cdn.jsdelivr.net/npm/rot-js@2/dist/rot.js"></script>
-  <script type="module" src="js/main.js"></script>
+  <script type="module" src="game.js"></script>
 </body>
 </html>
