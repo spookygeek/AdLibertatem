@@ -8,6 +8,8 @@ import { TextPanel }           from './ui/textpanel.js';
 import { CLASSES }             from './data/classes.js';
 import { ITEMS }               from './data/items.js';
 import { Vendor }              from './engine/economy.js';
+import { saveGame, loadGame,
+         hasSave, clearSave }  from './engine/saves.js';
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 const COLS     = 72;
@@ -133,9 +135,14 @@ const gs = {
 
   // Active combat data; populated when entering COMBAT state
   combat: {
-    enemy: null,
-    log:   [],
-    turn:  'player',  // 'player' | 'victory' | 'dead'
+    enemy:         null,
+    log:           [],
+    turn:          'player',   // 'player' | 'victory' | 'dead'
+    // Boss-specific state (reset on each new combat)
+    bossRaged:     false,  // Minotaur rage triggered
+    bossRegenned:  false,  // Hydra regen triggered
+    playerStunned: 0,      // turns remaining (Medusa)
+    cyclopsHits:   0,      // counter for boulder (every 3rd attack)
   },
 
   // Town / shop
@@ -188,6 +195,8 @@ function processEnemyTurns(gs) {
   for (const enemy of gs.dungeon.enemies) {
     if (!enemy.alive) continue;
 
+    if (enemy.isBoss) continue;  // bosses are stationary guardians; player must approach them
+
     const dist = Math.abs(enemy.x - gs.player.x) + Math.abs(enemy.y - gs.player.y);
     if (dist > DETECT_RANGE) continue;
 
@@ -219,15 +228,96 @@ function processEnemyTurns(gs) {
 
 function doEnemyAttack(gs) {
   const { player, combat } = gs;
-  const result = resolveMelee(combat.enemy, player);
-  applyDamage(player, result.damage);
-  combat.log.push(result.log);
+
+  // Medusa stun: player skips defending
+  if (combat.playerStunned > 0) {
+    combat.playerStunned--;
+    combat.log.push(`You are STUNNED! (${combat.playerStunned} turns remaining)`);
+    combat.turn = 'player';
+    return;
+  }
+
+  const enemy  = combat.enemy;
+  const isBoss = !!enemy.isBoss;
+
+  // Determine number of hits and attack opts for this turn
+  let hits = 1;
+  let opts = {};
+
+  if (isBoss) {
+    if (enemy.special === 'double') hits = 2;
+
+    if (enemy.special === 'chaos') {
+      const roll = ROT.RNG.getUniform();
+      if (roll < 0.33)      { opts = { dmgMultiplier: 0.5 }; combat.log.push('Chimera breathes ICE — weak hit!'); }
+      else if (roll < 0.66) { opts = { dmgMultiplier: 1.0 }; combat.log.push('Chimera strikes with claws!'); }
+      else                  { opts = { dmgMultiplier: 2.0 }; combat.log.push('Chimera breathes FIRE — massive hit!'); }
+    }
+
+    if (enemy.special === 'boulder') {
+      combat.cyclopsHits = (combat.cyclopsHits || 0) + 1;
+      if (combat.cyclopsHits % 3 === 0) {
+        opts = { ignoreDefense: true, dmgMultiplier: 1.5 };
+        combat.log.push('Cyclops hurls a BOULDER — ignores your armor!');
+      }
+    }
+  }
+
+  for (let i = 0; i < hits; i++) {
+    if (player.isDead()) break;
+    const result = resolveMelee(enemy, player, opts);
+    applyDamage(player, result.damage);
+    combat.log.push(result.log);
+
+    // Medusa stun chance
+    if (isBoss && enemy.special === 'stun' && result.damage > 0 && ROT.RNG.getUniform() < 0.25) {
+      combat.playerStunned = 1;
+      combat.log.push('PETRIFIED by Medusa\'s gaze! (skip next turn)');
+    }
+  }
 
   if (player.isDead()) {
     combat.log.push('You have fallen...');
     combat.turn = 'dead';
   } else {
     combat.turn = 'player';
+  }
+}
+
+/**
+ * Check and trigger boss phase transitions after player deals damage.
+ * Called only when the boss is still alive.
+ */
+function checkBossPhase(gs) {
+  const { combat } = gs;
+  const enemy   = combat.enemy;
+  const hpRatio = enemy.stats.hp / enemy.stats.maxHp;
+
+  if (enemy.special === 'rage' && !combat.bossRaged && hpRatio < 0.5) {
+    combat.bossRaged  = true;
+    enemy.stats.str   = Math.floor(enemy.stats.str * 2);
+    combat.log.push('The Minotaur RAGES — its strength doubles!');
+  }
+
+  if (enemy.special === 'regen' && !combat.bossRegenned && hpRatio < 0.5) {
+    combat.bossRegenned = true;
+    const heal = Math.floor(enemy.stats.maxHp * 0.30);
+    enemy.stats.hp = Math.min(enemy.stats.maxHp, enemy.stats.hp + heal);
+    combat.log.push(`The Hydra regenerates! (+${heal} HP)`);
+  }
+}
+
+/** Drop boss loot items onto the dungeon floor at the boss's position. */
+function dropBossLoot(gs) {
+  const { combat, dungeon } = gs;
+  const boss = combat.enemy;
+  boss.loot.forEach((itemId) => {
+    const def = ITEMS[itemId];
+    if (!def) return;
+    dungeon.items.push({ itemId, x: boss.x, y: boss.y, char: def.char, color: def.color });
+  });
+  if (boss.loot.length > 0) {
+    combat.log.push(`Dropped: ${boss.loot.map(id => ITEMS[id]?.name ?? id).join(', ')}`);
   }
 }
 
@@ -241,12 +331,18 @@ function doPlayerAttack(gs) {
     combat.enemy.alive = false;
     const leveled = player.gainXp(combat.enemy.xp);
     player.gold += combat.enemy.gold;
-    combat.log.push(
-      `${combat.enemy.name} defeated!  +${combat.enemy.xp} XP  +${combat.enemy.gold} gold`,
-    );
+    combat.log.push(`${combat.enemy.name} defeated!  +${combat.enemy.xp} XP  +${combat.enemy.gold} gold`);
     leveled.forEach(lv => combat.log.push(`★ LEVEL UP — you are now level ${lv}!`));
+
+    if (combat.enemy.isBoss) {
+      gs.dungeon.bossDefeated = true;
+      dropBossLoot(gs);
+      combat.log.push('The guardian has fallen. The stairs are now accessible!');
+    }
+
     combat.turn = 'victory';
   } else {
+    if (combat.enemy.isBoss) checkBossPhase(gs);
     doEnemyAttack(gs);
   }
 }
@@ -283,8 +379,13 @@ function doUseItem(gs) {
       player.gold += combat.enemy.gold;
       combat.log.push(`${combat.enemy.name} defeated! +${combat.enemy.xp} XP  +${combat.enemy.gold} gold`);
       leveled.forEach(lv => combat.log.push(`★ LEVEL UP — level ${lv}!`));
+      if (combat.enemy.isBoss) {
+        gs.dungeon.bossDefeated = true;
+        dropBossLoot(gs);
+        combat.log.push('The guardian has fallen. The stairs are now accessible!');
+      }
       combat.turn = 'victory';
-      return; // skip enemy counter-attack
+      return;
     }
   }
 
@@ -340,19 +441,44 @@ const TITLE = {
       renderer.centerX("A Gladiator's Journey to Freedom", 18), 205, '#888', 18,
     );
     renderer.hline(415, '#2a2a2a');
+
+    if (hasSave()) {
+      renderer.text(
+        '[Enter]  New Game',
+        renderer.centerX('[Enter]  New Game', 16), 445, '#888', 16,
+      );
+      renderer.text(
+        '[C]  Continue',
+        renderer.centerX('[C]  Continue', 18), 476, '#ffca28', 18,
+      );
+    } else {
+      renderer.text(
+        'PRESS  ENTER  TO  BEGIN',
+        renderer.centerX('PRESS  ENTER  TO  BEGIN', 16), 458, '#bbb', 16,
+      );
+    }
+
     renderer.text(
-      'PRESS  ENTER  TO  BEGIN',
-      renderer.centerX('PRESS  ENTER  TO  BEGIN', 16), 448, '#bbb', 16,
-    );
-    renderer.text(
-      'Arrow keys + Enter to navigate   |   Escape to return to Ludus in-game',
-      renderer.centerX('Arrow keys + Enter to navigate   |   Escape to return to Ludus in-game', 12),
-      492, '#444', 12,
+      'Arrow keys + Enter to navigate   |   Escape returns to Ludus in-game',
+      renderer.centerX('Arrow keys + Enter to navigate   |   Escape returns to Ludus in-game', 12),
+      516, '#444', 12,
     );
   },
 
   handle(gs, e) {
     if (e.key === 'Enter') { transition('CHARACTER_CLASS'); return false; }
+
+    if (e.key.toLowerCase() === 'c' && hasSave()) {
+      const saved = loadGame(CLASSES);
+      if (saved) {
+        gs.player        = saved.player;
+        gs.activeMission = saved.activeMission;
+        gs.dungeon       = null;
+        gs.messages      = ['Welcome back, gladiator.'];
+        transition('LUDUS');
+        return false;
+      }
+    }
     return false;
   },
 };
@@ -502,6 +628,7 @@ const CHARACTER_NAME = {
       return true;
     }
     if (e.key === 'Enter' && gs.pendingName.trim().length > 0) {
+      clearSave();  // new character wipes any existing save
       gs.player      = new Player(gs.pendingClass);
       gs.player.name = gs.pendingName.trim();
       transition('INTRO');
@@ -551,7 +678,7 @@ const INTRO = {
 // STATE: LUDUS
 // ═══════════════════════════════════════════════════════════════════════════════
 const LUDUS = {
-  enter() {},
+  enter(gs) { if (gs.player) saveGame(gs); },
 
   draw(gs) {
     renderer.clearFull('#0c0c0f');
@@ -639,6 +766,10 @@ const EXPLORATION = {
   enter(gs) {
     gs.ludusRested = false;
     gs.dungeon.computeFov(gs.player.x, gs.player.y);
+    if (gs.dungeon.bossFloor) {
+      const boss = gs.dungeon.enemies.find(e => e.isBoss && e.alive);
+      if (boss) gs.messages.push(`⚠ BOSS FLOOR — defeat the ${boss.name} to access the stairs!`);
+    }
   },
 
   draw(gs) {
@@ -720,8 +851,14 @@ const EXPLORATION = {
 // ═══════════════════════════════════════════════════════════════════════════════
 const COMBAT = {
   enter(gs) {
+    // Reset per-combat boss state
+    gs.combat.bossRaged     = false;
+    gs.combat.bossRegenned  = false;
+    gs.combat.playerStunned = 0;
+    gs.combat.cyclopsHits   = 0;
     if (!gs.combat.log.length) {
-      gs.combat.log = [`You engage the ${gs.combat.enemy.name}!`];
+      const prefix = gs.combat.enemy.isBoss ? '⚔ BOSS BATTLE — ' : '';
+      gs.combat.log = [`${prefix}You engage the ${gs.combat.enemy.name}!`];
     }
   },
 

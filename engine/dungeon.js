@@ -1,12 +1,11 @@
-import { createEnemy } from '../data/enemies.js';
-import { ITEMS }       from '../data/items.js';
+import { createEnemy }         from '../data/enemies.js';
+import { ITEMS }               from '../data/items.js';
+import { BOSSES, createBoss }  from '../data/bosses.js';
 
 const FOV_RADIUS = 8;
 
-// How many enemies spawn per floor (min 4, scales with depth, cap 12)
 const enemyCount = (floor) => Math.min(4 + Math.floor(floor * 0.6), 12);
 
-// Enemy type pool by floor depth
 function enemyPool(floor) {
   if (floor < 4)  return ['prisoner', 'prisoner', 'gladiator', 'beast'];
   if (floor < 8)  return ['gladiator', 'mercenary', 'beast', 'prisoner'];
@@ -16,25 +15,29 @@ function enemyPool(floor) {
 
 export class Dungeon {
   constructor(cols, rows) {
-    this.cols     = cols;
-    this.rows     = rows;
-    this.tiles    = {};
-    this.startX   = 1;
-    this.startY   = 1;
-    this.floor    = 1;
-    this.rooms    = [];
-    this.visible  = new Set();
-    this.explored = new Set();
-    this.enemies  = [];
-    this.items    = [];
+    this.cols         = cols;
+    this.rows         = rows;
+    this.tiles        = {};
+    this.startX       = 1;
+    this.startY       = 1;
+    this.floor        = 1;
+    this.rooms        = [];
+    this.visible      = new Set();
+    this.explored     = new Set();
+    this.enemies      = [];
+    this.items        = [];
+    this.bossFloor    = false;  // true when this floor has a boss guardian
+    this.bossDefeated = false;  // stairs only unlock when true
   }
 
   generate() {
-    this.tiles    = {};
-    this.visible  = new Set();
-    this.explored = new Set();
-    this.enemies  = [];
-    this.items    = [];   // { itemId, x, y }
+    this.tiles        = {};
+    this.visible      = new Set();
+    this.explored     = new Set();
+    this.enemies      = [];
+    this.items        = [];
+    this.bossFloor    = false;
+    this.bossDefeated = false;
 
     const digger = new ROT.Map.Digger(this.cols, this.rows);
     digger.create((x, y, wall) => {
@@ -49,6 +52,7 @@ export class Dungeon {
     }
 
     this._placeStairs();
+    this._spawnBoss();       // must run before _spawnEnemies so boss room is flagged
     this._spawnEnemies();
     this._spawnItems();
     return this;
@@ -59,10 +63,6 @@ export class Dungeon {
     this.generate();
   }
 
-  /**
-   * Recompute which tiles are currently visible from (px, py).
-   * Clears this.visible, then fills it (and this.explored) using rot.js FOV.
-   */
   computeFov(px, py) {
     this.visible.clear();
     const fov = new ROT.FOV.PreciseShadowcasting((x, y) => {
@@ -80,8 +80,11 @@ export class Dungeon {
     return this.tiles[`${x},${y}`] === '.';
   }
 
+  /** Stairs are only accessible when the boss has been defeated (or there is no boss). */
   isStairs(x, y) {
-    return this.tiles[`${x},${y}`] === '>';
+    if (this.tiles[`${x},${y}`] !== '>') return false;
+    if (this.bossFloor && !this.bossDefeated) return false;
+    return true;
   }
 
   _placeStairs() {
@@ -90,8 +93,26 @@ export class Dungeon {
     this.tiles[`${last[0]},${last[1]}`] = '>';
   }
 
+  _spawnBoss() {
+    const template = BOSSES.find(b => b.floor === this.floor);
+    if (!template) return;
+
+    this.bossFloor = true;
+
+    // Boss guards the last room (same room as the stairs)
+    const lastRoom = this.rooms[this.rooms.length - 1];
+    const center   = lastRoom.getCenter();
+
+    // Place boss one tile away from stairs so both can coexist
+    const bx = center[0] + (center[0] < this.cols / 2 ? 1 : -1);
+    const by = center[1];
+
+    const boss = createBoss(template.id, bx, by, this.floor);
+    this.enemies.push(boss);
+  }
+
   _spawnItems() {
-    const count = 2 + Math.floor(ROT.RNG.getUniform() * 3); // 2–4 items
+    const count = 2 + Math.floor(ROT.RNG.getUniform() * 3);
     const pool  = this._itemPool();
 
     for (let i = 0; i < count; i++) {
@@ -119,7 +140,6 @@ export class Dungeon {
       if (tries >= 20) continue;
       const itemId = ROT.RNG.getItem(pool);
       const def    = ITEMS[itemId];
-      // Store char + color inline so the renderer needs no extra import
       this.items.push({ itemId, x, y, char: def.char, color: def.color });
     }
   }
@@ -132,7 +152,7 @@ export class Dungeon {
   }
 
   _spawnEnemies() {
-    // Skip first room (player start) and last room (stairs)
+    // Skip first room (player start) and last room (boss/stairs)
     const spawnRooms = this.rooms.slice(1, this.rooms.length - 1);
     if (spawnRooms.length === 0) return;
 
@@ -146,7 +166,7 @@ export class Dungeon {
       const right = room.getRight() - 1;
       const bot   = room.getBottom()- 1;
 
-      if (right < left || bot < top) continue; // room too small
+      if (right < left || bot < top) continue;
 
       let x, y, tries = 0;
       do {
@@ -159,9 +179,7 @@ export class Dungeon {
       );
 
       if (tries >= 20) continue;
-
-      const typeId = ROT.RNG.getItem(pool);
-      this.enemies.push(createEnemy(typeId, x, y, this.floor));
+      this.enemies.push(createEnemy(ROT.RNG.getItem(pool), x, y, this.floor));
     }
   }
 }
