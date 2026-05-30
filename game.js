@@ -420,6 +420,8 @@ const EXPLORATION = {
   enter(gs) {
     // Reset barracks rest so the player can rest again next cycle
     gs.ludusRested = false;
+    // Reveal the tiles visible from the player's starting position
+    gs.dungeon.computeFov(gs.player.x, gs.player.y);
   },
 
   draw(gs) {
@@ -446,6 +448,7 @@ const EXPLORATION = {
       gs.dungeon.descend();
       gs.player.x = gs.dungeon.startX;
       gs.player.y = gs.dungeon.startY;
+      gs.dungeon.computeFov(gs.player.x, gs.player.y);
       gs.messages.push(`Descended to floor ${gs.dungeon.floor}.`);
       return true;
     }
@@ -453,6 +456,7 @@ const EXPLORATION = {
     if (gs.dungeon.isPassable(nx, ny)) {
       gs.player.x = nx;
       gs.player.y = ny;
+      gs.dungeon.computeFov(gs.player.x, gs.player.y);
       return true;
     }
 

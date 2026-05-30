@@ -2,10 +2,18 @@ const FONT_SIZE = 16;
 const CELL_W = 10;
 const CELL_H = FONT_SIZE;
 
+// Full brightness — tile is in the player's current FOV
 const GLYPH = {
-  '#': { char: '#', color: '#555' },
-  '.': { char: '.', color: '#2a2a2a' },
-  '>': { char: '>', color: '#aaa' },
+  '#': { char: '#', color: '#888' },
+  '.': { char: '.', color: '#444' },
+  '>': { char: '>', color: '#ccc' },
+};
+
+// Dim memory — tile was explored but is no longer in FOV
+const GLYPH_DIM = {
+  '#': { char: '#', color: '#2a2a2a' },
+  '.': { char: '.', color: '#1a1a1a' },
+  '>': { char: '>', color: '#555' },
 };
 
 export class Renderer {
@@ -92,8 +100,17 @@ export class Renderer {
 
     for (const [key, tile] of Object.entries(dungeon.tiles)) {
       const [x, y] = key.split(',').map(Number);
-      const g = GLYPH[tile] ?? GLYPH['#'];
-      this.drawChar(g.char, x, y, g.color);
+
+      if (dungeon.visible.has(key)) {
+        // Currently in FOV — full brightness
+        const g = GLYPH[tile] ?? GLYPH['#'];
+        this.drawChar(g.char, x, y, g.color);
+      } else if (dungeon.explored.has(key)) {
+        // Seen before but not currently visible — dim memory
+        const g = GLYPH_DIM[tile] ?? GLYPH_DIM['#'];
+        this.drawChar(g.char, x, y, g.color);
+      }
+      // Hidden tiles: draw nothing — black background shows through
     }
 
     this.drawChar(player.char, player.x, player.y, player.color);
