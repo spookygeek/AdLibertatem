@@ -6,6 +6,7 @@ import { Renderer }            from './ui/renderer.js';
 import { Hud }                 from './ui/hud.js';
 import { TextPanel }           from './ui/textpanel.js';
 import { CLASSES }             from './data/classes.js';
+import { ITEMS }               from './data/items.js';
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 const COLS     = 72;
@@ -181,6 +182,47 @@ function doPlayerAttack(gs) {
   } else {
     doEnemyAttack(gs);
   }
+}
+
+/**
+ * Use the best available item from inventory during combat.
+ * Priority: fire scroll > bull's blood > health potion > mana potion.
+ * Using an item costs the player's turn (enemy attacks back) unless it ends combat.
+ */
+function doUseItem(gs) {
+  const { player, combat } = gs;
+  const priority = ['scroll_of_fire', 'bulls_blood_potion', 'health_potion', 'mana_potion'];
+  const useId    = priority.find(id => player.inventory.has(id));
+
+  if (!useId) {
+    combat.log.push('No usable items in your pack!');
+    return;
+  }
+
+  const result = player.useItem(useId);
+  if (!result) return;
+
+  if (result.effect === 'heal') {
+    combat.log.push(`Used ${result.item.name} — restored ${result.amount} HP.`);
+  } else if (result.effect === 'restore_mp') {
+    combat.log.push(`Used ${result.item.name} — restored ${result.amount} MP.`);
+  } else if (result.effect === 'fireball') {
+    const dmg = result.item.damage;
+    applyDamage(combat.enemy, dmg);
+    combat.log.push(`Scroll of Fire! Dealt ${dmg} fire damage!`);
+    if (combat.enemy.stats.hp <= 0) {
+      combat.enemy.alive = false;
+      const leveled = player.gainXp(combat.enemy.xp);
+      player.gold += combat.enemy.gold;
+      combat.log.push(`${combat.enemy.name} defeated! +${combat.enemy.xp} XP  +${combat.enemy.gold} gold`);
+      leveled.forEach(lv => combat.log.push(`★ LEVEL UP — level ${lv}!`));
+      combat.turn = 'victory';
+      return; // skip enemy counter-attack
+    }
+  }
+
+  // Using an item costs a turn — enemy attacks back
+  doEnemyAttack(gs);
 }
 
 function doPlayerFlee(gs) {
@@ -494,8 +536,8 @@ const LUDUS = {
         return true;
       }
       case 'S':
-        gs.messages.push('[Stash] Coming in a future update.');
-        return true;
+        transition('STASH');
+        return false;
       case 'G':
         gs.messages.push('[Town Gate] Coming in a future update.');
         return true;
@@ -568,6 +610,19 @@ const EXPLORATION = {
     gs.player.y = ny;
     gs.dungeon.computeFov(gs.player.x, gs.player.y);
 
+    // Item pickup — auto-collect anything on this tile
+    const itemIdx = gs.dungeon.items.findIndex(
+      it => it.x === gs.player.x && it.y === gs.player.y,
+    );
+    if (itemIdx !== -1) {
+      const { itemId } = gs.dungeon.items[itemIdx];
+      gs.dungeon.items.splice(itemIdx, 1);
+      const result = gs.player.pickup(itemId);
+      const def    = ITEMS[itemId];
+      const verb   = result === 'equipped' ? '(equipped)' : '(stored in pack)';
+      gs.messages.push(`Picked up ${def.name} ${verb}.`);
+    }
+
     // Enemy turns — may transition to COMBAT if an enemy closes in
     processEnemyTurns(gs);
 
@@ -620,7 +675,7 @@ const COMBAT = {
     } else if (e.key.toLowerCase() === 'f') {
       doPlayerFlee(gs);    // may call transition('EXPLORATION') internally
     } else if (e.key.toLowerCase() === 'i') {
-      gs.combat.log.push('[USE ITEM] No items available yet.');
+      doUseItem(gs);
     } else {
       return false;
     }
@@ -672,6 +727,79 @@ const GAME_OVER = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// STATE: STASH
+// ═══════════════════════════════════════════════════════════════════════════════
+const SLOT_LABELS = {
+  head: 'Head', body: 'Body', boots: 'Boots',
+  mainhand: 'Weapon', offhand: 'Off-hand', ring: 'Ring', necklace: 'Neck',
+};
+
+const STASH = {
+  enter() {},
+
+  draw(gs) {
+    renderer.clearFull('#0a0a0a');
+    const W = canvas.width;
+    const H = canvas.height;
+
+    renderer.text('STASH', renderer.centerX('STASH', 26), 22, '#ffb74d', 26);
+    renderer.hline(58, '#2a2a2a');
+
+    // ── Left column: equipped gear ──────────────────────────────────────────
+    renderer.text('EQUIPPED', 40, 72, '#666', 13);
+    let ey = 94;
+    for (const [slot, label] of Object.entries(SLOT_LABELS)) {
+      const itemId = gs.player.equipment[slot];
+      const name   = itemId ? ITEMS[itemId].name : '(empty)';
+      const color  = itemId ? '#ccc' : '#3a3a3a';
+      renderer.text(`${label.padEnd(8)}: ${name}`, 40, ey, color, 13);
+      ey += 20;
+    }
+
+    // Stats summary
+    renderer.hline(ey + 8, '#1a1a1a');
+    ey += 20;
+    const s = gs.player.stats;
+    renderer.text(`STR ${s.str}  DEF ${s.def}  SPD ${s.spd}  HP ${s.hp}/${s.maxHp}  MP ${s.mp}/${s.maxMp}`, 40, ey, '#888', 13);
+
+    // ── Right column: pack ──────────────────────────────────────────────────
+    const RIGHT = Math.floor(W / 2) + 10;
+    renderer.text(`PACK  (${gs.player.inventory.slots.length}/${gs.player.inventory.capacity})`, RIGHT, 72, '#666', 13);
+
+    const packSlots = gs.player.inventory.slots;
+    if (packSlots.length === 0) {
+      renderer.text('(empty)', RIGHT, 94, '#3a3a3a', 13);
+    } else {
+      packSlots.slice(0, 15).forEach((slot, i) => {
+        const def = ITEMS[slot.itemId];
+        if (!def) return;
+        const qty  = slot.qty > 1 ? ` ×${slot.qty}` : '';
+        const hint = (def.type === 'weapon' || def.type === 'armor') ? ' [equip]' : '';
+        renderer.text(`[${i + 1}] ${def.name}${qty}${hint}`, RIGHT, 94 + i * 20, '#ccc', 13);
+      });
+    }
+
+    renderer.hline(H - 44, '#2a2a2a');
+    renderer.text('1–9 to equip gear from pack   Escape to leave', 40, H - 30, '#555', 13);
+  },
+
+  handle(gs, e) {
+    if (e.key === 'Escape') { transition('LUDUS'); return false; }
+
+    const idx = parseInt(e.key, 10) - 1;
+    if (!isNaN(idx) && idx >= 0 && idx < gs.player.inventory.slots.length) {
+      const { itemId } = gs.player.inventory.slots[idx];
+      const def = ITEMS[itemId];
+      if (def && (def.type === 'weapon' || def.type === 'armor')) {
+        gs.player.equip(itemId);
+        return true; // redraw to show updated equipment
+      }
+    }
+    return false;
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // State registry + machine
 // ═══════════════════════════════════════════════════════════════════════════════
 const STATES = {
@@ -683,6 +811,7 @@ const STATES = {
   EXPLORATION,
   COMBAT,
   GAME_OVER,
+  STASH,
 };
 
 /**

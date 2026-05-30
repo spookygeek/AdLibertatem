@@ -1,4 +1,5 @@
 import { createEnemy } from '../data/enemies.js';
+import { ITEMS }       from '../data/items.js';
 
 const FOV_RADIUS = 8;
 
@@ -25,6 +26,7 @@ export class Dungeon {
     this.visible  = new Set();
     this.explored = new Set();
     this.enemies  = [];
+    this.items    = [];
   }
 
   generate() {
@@ -32,6 +34,7 @@ export class Dungeon {
     this.visible  = new Set();
     this.explored = new Set();
     this.enemies  = [];
+    this.items    = [];   // { itemId, x, y }
 
     const digger = new ROT.Map.Digger(this.cols, this.rows);
     digger.create((x, y, wall) => {
@@ -47,6 +50,7 @@ export class Dungeon {
 
     this._placeStairs();
     this._spawnEnemies();
+    this._spawnItems();
     return this;
   }
 
@@ -84,6 +88,47 @@ export class Dungeon {
     if (this.rooms.length < 2) return;
     const last = this.rooms[this.rooms.length - 1].getCenter();
     this.tiles[`${last[0]},${last[1]}`] = '>';
+  }
+
+  _spawnItems() {
+    const count = 2 + Math.floor(ROT.RNG.getUniform() * 3); // 2–4 items
+    const pool  = this._itemPool();
+
+    for (let i = 0; i < count; i++) {
+      const room  = ROT.RNG.getItem(this.rooms);
+      const left  = room.getLeft()   + 1;
+      const top   = room.getTop()    + 1;
+      const right = room.getRight()  - 1;
+      const bot   = room.getBottom() - 1;
+
+      if (right < left || bot < top) continue;
+
+      let x, y, tries = 0;
+      do {
+        x = ROT.RNG.getUniformInt(left, right);
+        y = ROT.RNG.getUniformInt(top,  bot);
+        tries++;
+      } while (
+        tries < 20 && (
+          this.items.some(it => it.x === x && it.y === y) ||
+          this.enemies.some(e  => e.x  === x && e.y  === y) ||
+          (x === this.startX && y === this.startY)
+        )
+      );
+
+      if (tries >= 20) continue;
+      const itemId = ROT.RNG.getItem(pool);
+      const def    = ITEMS[itemId];
+      // Store char + color inline so the renderer needs no extra import
+      this.items.push({ itemId, x, y, char: def.char, color: def.color });
+    }
+  }
+
+  _itemPool() {
+    if (this.floor < 4)  return ['health_potion', 'health_potion', 'gladius', 'bronze_shield', 'iron_helm', 'leather_boots'];
+    if (this.floor < 8)  return ['health_potion', 'mana_potion', 'trident', 'iron_shield', 'scroll_of_fire', 'lorica_manica'];
+    if (this.floor < 15) return ['bulls_blood_potion', 'trident', 'serpent_scale', 'scroll_of_fire', 'scroll_of_haste', 'ring_of_strength'];
+    return ['bulls_blood_potion', 'giant_club', 'serpent_scale', 'regen_scroll', 'ring_of_vitality', 'amulet_of_fortune'];
   }
 
   _spawnEnemies() {

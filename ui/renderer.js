@@ -112,6 +112,13 @@ export class Renderer {
       // Hidden: draw nothing, black background shows through
     }
 
+    // Items on the floor — only draw when in the player's current FOV
+    for (const item of dungeon.items) {
+      if (dungeon.visible.has(`${item.x},${item.y}`)) {
+        this.drawChar(item.char, item.x, item.y, item.color);
+      }
+    }
+
     // Enemies — only draw when in the player's current FOV
     for (const enemy of dungeon.enemies) {
       if (!enemy.alive) continue;
